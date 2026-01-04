@@ -1,389 +1,204 @@
 import shutil
+import json
+import time
+from threading import Thread
 from flask import Flask, jsonify, request, send_file
+from apscheduler.schedulers.background import BackgroundScheduler
+import atexit
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import os
 import uuid
 import io
 import zipfile
-import yagmail
-from database.dbhandler import hash_file
 from src.redaction_service import process_pdf_redaction
-from src.ocr_redaction import ocr_from_pdf
-from src.ollamahandler import OllamaClient
-from database.models import get_db, Document
+from src.model import get_entity_types, get_default_entities
 
 app = Flask(__name__)
-# Configure CORS with more specific settings
 CORS(app, resources={
     r"/*": {
         "origins": "*",
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization", "Access-Control-Allow-Credentials"]
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Accept"]
     }
 })
 
 UPLOAD_FOLDER = 'temp_uploads'
-STORAGE_FOLDER = 'document_storage'
 ALLOWED_EXTENSIONS = {'pdf'}
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(STORAGE_FOLDER, exist_ok=True)
+
+# --- Background Cleanup Task ---
+def clean_old_uploads():
+    """Delete folders in UPLOAD_FOLDER older than 1 hour"""
+    now = time.time()
+    cutoff = 3600  # 1 hour in seconds
+    try:
+        if not os.path.exists(UPLOAD_FOLDER):
+            return
+            
+        for filename in os.listdir(UPLOAD_FOLDER):
+            file_path = os.path.join(UPLOAD_FOLDER, filename)
+            # Check if it's a directory (session folder)
+            if os.path.isdir(file_path):
+                # Check creation time
+                if os.stat(file_path).st_mtime < now - cutoff:
+                    try:
+                        shutil.rmtree(file_path, ignore_errors=True)
+                        print(f"[Cleanup] Removed old session: {filename}")
+                    except Exception as e:
+                        print(f"[Cleanup] Failed to remove {filename}: {e}")
+    except Exception as e:
+        print(f"[Cleanup] Error during scan: {e}")
+
+# Initialize Scheduler
+scheduler = BackgroundScheduler()
+scheduler.add_job(func=clean_old_uploads, trigger="interval", minutes=30)
+scheduler.start()
+
+# Shut down the scheduler when exiting the app
+atexit.register(lambda: scheduler.shutdown())
+
 
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def send_email(to_email, subject="Verify Access to Medical Records", contents="Kindly review and verify the redacted document before it is shared for research"):
-    """
-    Sends an email using Yagmail.
-    Parameters:
-        to_email: Recipient's email address.
-        subject: Subject of the email.
-        contents: Content of the email (can be HTML).
-    """
-    try:
-        # Initializing the server connection
-        yag = yagmail.SMTP(user='redactly.ai@gmail.com', password='dmzhqlwrqeuuianr')
-        
-        # Check if contents is HTML (contains HTML tags)
-        is_html = '<' in contents and '>' in contents
-        
-        # For debugging
-        print(f"Sending email to: {to_email}")
-        print(f"Subject: {subject}")
-        print(f"Is HTML: {is_html}")
-        
-        # Clean up any potential issues with the content
-        contents = contents.replace('\0', '')
-        
-        # Send the email - yagmail automatically detects HTML content
-        # and sends it appropriately without needing the html parameter
-        yag.send(to=to_email, subject=subject, contents=contents)
-            
-        return {"status": "success", "message": "Email sent successfully"}
-    except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        print(f"Email error: {str(e)}")
-        print(f"Error details: {error_details}")
-        return {"status": "error", "message": f"Error sending email: {str(e)}"}
-
-
-@app.route('/email/send', methods=['POST', 'OPTIONS'])
-def send_notification_email():
-    # Handle preflight OPTIONS request
-    if request.method == 'OPTIONS':
-        response = jsonify({'status': 'ok'})
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
-        return response
-        
-    try:
-        data = request.json
-        
-        # Check for required fields
-        if not data or 'email' not in data:
-            return jsonify({'error': 'Email address is required'}), 400
-        
-        to_email = data['email']
-        subject = data.get('subject', "Verify Access to Medical Records")
-        contents = data.get('contents', "Kindly review and verify the redacted document before it is shared for research")
-        
-        # Send the email
-        result = send_email(to_email, subject, contents)
-        
-        if result['status'] == 'success':
-            return jsonify(result), 200
-        else:
-            return jsonify(result), 500
-    except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        print(f"API error: {str(e)}")
-        print(f"Error details: {error_details}")
-        return jsonify({'error': f"Server error: {str(e)}"}), 500
-
-
-@app.route('/document/add', methods=['POST'])
-def add_document():
-    # Check if the post request has files
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file provided'}), 400
-
-    file = request.files['file']
-    email = request.form.get('email')
-
-    if not email:
-        return jsonify({'error': 'Email is required'}), 400
-
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
-
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        temp_path = os.path.join(UPLOAD_FOLDER, filename)
-        file.save(temp_path)
-
-        # Create storage path - using UUID since hash will be added later
-        file_id = str(uuid.uuid4())
-        storage_filename = f"{file_id}_{filename}"
-        storage_path = os.path.join(STORAGE_FOLDER, storage_filename)
-
-        # Move file to permanent storage
-        shutil.move(temp_path, storage_path)
-
-        # Save to database with NULL hash initially
-        try:
-            db = next(get_db())
-
-            # Check if document with this path already exists
-            existing_doc = db.query(Document).filter(
-                Document.path == storage_path).first()
-
-            if existing_doc:
-                return jsonify({'error': 'Document with this path already exists'}), 409
-
-            # Create new document record with NULL hash
-            new_document = Document(
-                path=storage_path,
-                email=email,
-                hash=None  # Hash will be updated after structured data processing
-            )
-
-            db.add(new_document)
-            db.commit()
-
-            return jsonify({
-                'message': 'Document added successfully',
-                'path': storage_path,
-                'email': email
-            })
-
-        except Exception as e:
-            db.rollback()
-            # Clean up file if database operation failed
-            if os.path.exists(storage_path):
-                os.remove(storage_path)
-            return jsonify({'error': f'Error adding document to database: {str(e)}'}), 500
-        finally:
-            db.close()
-
-    return jsonify({'error': 'Invalid file type'}), 400
-
-
-@app.route('/documents', methods=['GET'])
-def get_documents():
-    email_filter = request.args.get('email')
-
-    try:
-        db = next(get_db())
-        query = db.query(Document)
-
-        # Filter by email if provided
-        if email_filter:
-            query = query.filter(Document.email == email_filter)
-
-        documents = query.all()
-
-        result = []
-        for doc in documents:
-            result.append({
-                'path': doc.path,
-                'email': doc.email,
-                'hash': doc.hash,
-                'filename': os.path.basename(doc.path),
-                # Flag to indicate if document has been processed
-                'processed': doc.hash is not None
-            })
-
-        return jsonify(result)
-
-    except Exception as e:
-        return jsonify({'error': f'Error fetching documents: {str(e)}'}), 500
-    finally:
-        db.close()
-
-
-@app.route('/document/hash/<hash>', methods=['GET'])
-def get_document_by_hash(hash):
-    try:
-        db = next(get_db())
-        document = db.query(Document).filter(Document.hash == hash).first()
-
-        if not document:
-            return jsonify({'error': 'Document not found'}), 404
-
-        return send_file(
-            document.path,
-            mimetype='application/pdf',
-            as_attachment=True,
-            download_name=os.path.basename(document.path)
-        )
-
-    except Exception as e:
-        return jsonify({'error': f'Error fetching document: {str(e)}'}), 500
-    finally:
-        db.close()
-
-
-@app.route('/structured', methods=['POST'])
-def structured_data():
-    # Process documents and update their hash values
-
-    # Check if document paths are provided
-    if not request.json or 'document_paths' not in request.json:
-        return jsonify({'error': 'No document paths provided'}), 400
-
-    document_paths = request.json['document_paths']
-
-    if not document_paths:
-        return jsonify({'error': 'Empty document path list'}), 400
-
-    # Create a unique session ID for this batch
-    session_id = str(uuid.uuid4())
-    session_folder = os.path.join(UPLOAD_FOLDER, session_id)
-    os.makedirs(session_folder, exist_ok=True)
-
-    try:
-        client = OllamaClient()
-        results = []
-        db = next(get_db())
-
-        for doc_path in document_paths:
-            # Get document from database
-            document = db.query(Document).filter(
-                Document.path == doc_path).first()
-
-            if not document:
-                results.append({
-                    'error': f'Document with path {doc_path} not found',
-                    'path': doc_path
-                })
-                continue
-
-            if not os.path.exists(doc_path):
-                results.append({
-                    'error': f'File not found at path {doc_path}',
-                    'path': doc_path
-                })
-                continue
-
-            # Process document to get structured data
-            text = ocr_from_pdf(doc_path)
-            structured_result = client.get_structured_data(text)
-
-            # Calculate hash for the structured data
-            doc_hash = hash_file(structured_result)
-
-            # Update document in database with hash
-            document.hash = doc_hash
-
-            # Add document info to results
-            results.append({
-                'structured_data': structured_result,
-                'hash': doc_hash,
-                'path': doc_path,
-                'filename': os.path.basename(doc_path),
-                'email': document.email
-            })
-
-        # Commit all database changes
-        db.commit()
-
-        # Clean up temporary session folder
-        if os.path.exists(session_folder):
-            os.rmdir(session_folder)
-
-        return jsonify(results)
-
-    except Exception as e:
-        # Rollback database changes on error
-        if 'db' in locals():
-            db.rollback()
-
-        # Clean up temporary session folder
-        if os.path.exists(session_folder):
-            os.rmdir(session_folder)
-
-        return jsonify({'error': f'Error processing documents: {str(e)}'}), 500
-
-    finally:
-        if 'db' in locals():
-            db.close()
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint."""
+    return jsonify({'status': 'healthy'})
 
 
 @app.route('/redact', methods=['POST'])
 def redact_pdfs():
-    # Handle form data instead of JSON
+    """
+    Redact PII from uploaded PDF files.
+    
+    Accepts multipart form data with:
+        - files: PDF files to redact
+        - method: Redaction method ('full_redact', 'obfuscate', 'replace')
+        - replace_text: Replacement text for 'replace' method
+        - keywords: JSON array of custom keywords to redact
+        - match_mode: Keyword matching mode ('exact', 'fuzzy', 'regex')
+        - fuzzy_threshold: Similarity threshold for fuzzy matching (0-100)
+        - enabled_entities: JSON array of Presidio entity types to enable
+    
+    Returns:
+        ZIP file containing redacted PDFs
+    """
+    # Parse form data
     method = request.form.get('method', 'full_redact')
     replace_text = request.form.get('replace_text', '[REDACTED]')
+    
+    # Parse custom keywords
+    keywords_raw = request.form.get('keywords', '')
+    custom_keywords = None
+    if keywords_raw:
+        try:
+            custom_keywords = json.loads(keywords_raw)
+            if not isinstance(custom_keywords, list):
+                custom_keywords = [custom_keywords]
+        except json.JSONDecodeError:
+            custom_keywords = [k.strip() for k in keywords_raw.split(',') if k.strip()]
+    
+    # Parse match mode
+    match_mode = request.form.get('match_mode', 'exact')
+    if match_mode not in ['exact', 'fuzzy', 'regex']:
+        match_mode = 'exact'
+    
+    # Parse fuzzy threshold
+    try:
+        fuzzy_threshold = int(request.form.get('fuzzy_threshold', '85'))
+        fuzzy_threshold = max(0, min(100, fuzzy_threshold))
+    except ValueError:
+        fuzzy_threshold = 85
+    
+    # Parse enabled entities
+    entities_raw = request.form.get('enabled_entities', '')
+    enabled_entities = None
+    if entities_raw:
+        try:
+            enabled_entities = json.loads(entities_raw)
+            if not isinstance(enabled_entities, list):
+                enabled_entities = None
+        except json.JSONDecodeError:
+            enabled_entities = None
 
-    # Create a unique session ID for this batch
+    # Create session folder
     session_id = str(uuid.uuid4())
     session_folder = os.path.join(UPLOAD_FOLDER, session_id)
     os.makedirs(session_folder, exist_ok=True)
 
     try:
-        # Handle file uploads
+        # Validate files
         if 'files' not in request.files:
-            return jsonify({'error': 'No files part in the request'}), 400
+            return jsonify({'error': 'No files provided'}), 400
 
         files = request.files.getlist('files')
         if not files or len(files) == 0:
             return jsonify({'error': 'No files selected'}), 400
 
-        # Process uploaded files
+        # Save uploaded files
         uploaded_paths = []
         for file in files:
-            if file and file.filename:
+            if file and file.filename and allowed_file(file.filename):
                 filename = secure_filename(file.filename)
                 file_path = os.path.join(session_folder, filename)
                 file.save(file_path)
                 uploaded_paths.append(file_path)
 
         if not uploaded_paths:
-            return jsonify({'error': 'No valid files uploaded'}), 400
+            return jsonify({'error': 'No valid PDF files uploaded'}), 400
 
-        # Process the batch of PDFs
+        # Log request
+        print(f"[Redact] Files: {len(uploaded_paths)}, Method: {method}, " 
+              f"Keywords: {custom_keywords}, Mode: {match_mode}")
+
+        # Process PDFs
         output_paths = process_pdf_redaction(
-            uploaded_paths, session_folder, method, replace_text)
+            input_files=uploaded_paths,
+            output_folder=session_folder,
+            method=method,
+            replace_text=replace_text,
+            custom_keywords=custom_keywords,
+            match_mode=match_mode,
+            fuzzy_threshold=fuzzy_threshold,
+            enabled_entities=enabled_entities
+        )
 
-        # Create a ZIP file with all redacted PDFs
+        # Create ZIP response
         memory_file = io.BytesIO()
-        with zipfile.ZipFile(memory_file, 'w') as zf:
+        with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
             for output_path in output_paths:
-                arcname = os.path.basename(output_path)
-                zf.write(output_path, arcname)
-
+                zf.write(output_path, os.path.basename(output_path))
         memory_file.seek(0)
 
-        # Clean up temporary files
-        for file_path in uploaded_paths:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-
-        for output_path in output_paths:
-            if os.path.exists(output_path):
-                os.remove(output_path)
-
-        if os.path.exists(session_folder):
-            shutil.rmtree(session_folder)
+        # Cleanup
+        shutil.rmtree(session_folder, ignore_errors=True)
 
         return send_file(
             memory_file,
             mimetype='application/zip',
             as_attachment=True,
-            download_name=f'redacted_pdfs_{session_id}.zip'
+            download_name=f'redacted_{session_id[:8]}.zip'
         )
 
     except Exception as e:
-        # Clean up on error
-        if os.path.exists(session_folder):
-            shutil.rmtree(session_folder)
-        return jsonify({'error': f'Error processing files: {str(e)}'}), 500
+        shutil.rmtree(session_folder, ignore_errors=True)
+        print(f"[Error] {str(e)}")
+        return jsonify({'error': f'Processing failed: {str(e)}'}), 500
+
+
+@app.route('/entity-types', methods=['GET'])
+def get_available_entity_types():
+    """Get available Presidio entity types."""
+    return jsonify({
+        'entity_types': get_entity_types(),
+        'default_entities': get_default_entities()
+    })
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Use Gunicorn for production, but this block is for local dev
+    app.run(host='0.0.0.0', port=5000, debug=False)

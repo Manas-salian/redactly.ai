@@ -1,10 +1,33 @@
 # ocr_redaction.py
+"""
+OCR and PDF Redaction Module
+
+Handles text extraction from PDFs (both text layer and OCR from images)
+and applies redactions with accurate position detection.
+
+Supports:
+- Native PDF text layer extraction
+- OCR for scanned documents/embedded images  
+- Fuzzy matching for typo-tolerant redaction
+- Character-level position detection as fallback
+"""
+
 import fitz
 import pytesseract
 import cv2
 import io
+import re
 import numpy as np
 from PIL import Image
+from typing import List, Optional, Tuple, Dict, Any
+
+# Import RapidFuzz for fuzzy matching in OCR results
+try:
+    from rapidfuzz import fuzz
+    RAPIDFUZZ_AVAILABLE = True
+except ImportError:
+    RAPIDFUZZ_AVAILABLE = False
+    print("Warning: rapidfuzz not installed. Fuzzy matching in OCR disabled.")
 
 
 def print_contents(input_path, output_txt_path):
@@ -79,8 +102,170 @@ def perform_ocr(image):
     return ocr_text
 
 
+def search_text_with_fallback(
+    page: fitz.Page,
+    term: str,
+    fuzzy_threshold: Optional[int] = None
+) -> List[fitz.Rect]:
+    """
+    Search for text in a PDF page with fallback strategies.
+    
+    First tries PyMuPDF's native search, then falls back to
+    character-level search for better accuracy with complex layouts.
+    
+    Args:
+        page: PyMuPDF page object
+        term: Text to search for
+        fuzzy_threshold: If set, enable fuzzy matching (0-100)
+        
+    Returns:
+        List of fitz.Rect objects representing match positions
+    """
+    # Strategy 1: Native PyMuPDF search (fastest, handles most cases)
+    areas = page.search_for(term)
+    if areas:
+        return areas
+    
+    # Strategy 2: Case-insensitive search
+    areas = page.search_for(term.lower())
+    if areas:
+        return areas
+    areas = page.search_for(term.upper())
+    if areas:
+        return areas
+    
+    # Strategy 3: Character-level search using text dictionary
+    if not areas:
+        areas = _character_level_search(page, term)
+        if areas:
+            return areas
+    
+    # Strategy 4: Fuzzy matching (if enabled and RapidFuzz available)
+    if fuzzy_threshold and RAPIDFUZZ_AVAILABLE:
+        areas = _fuzzy_search_in_page(page, term, fuzzy_threshold)
+        if areas:
+            return areas
+    
+    return []
+
+
+def _character_level_search(
+    page: fitz.Page,
+    term: str
+) -> List[fitz.Rect]:
+    """
+    Search for text using character-level position mapping.
+    Useful for text split across spans or with unusual formatting.
+    """
+    positions = []
+    term_lower = term.lower()
+    
+    try:
+        text_dict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+        
+        for block in text_dict.get("blocks", []):
+            if "lines" not in block:
+                continue
+            
+            for line in block["lines"]:
+                # Concatenate all spans in the line
+                line_text = ""
+                span_info = []  # [(start_idx, end_idx, bbox), ...]
+                
+                for span in line["spans"]:
+                    span_text = span["text"]
+                    span_start = len(line_text)
+                    span_end = span_start + len(span_text)
+                    span_info.append((span_start, span_end, span["bbox"]))
+                    line_text += span_text
+                
+                # Search for term in concatenated line text
+                line_lower = line_text.lower()
+                idx = 0
+                while True:
+                    found_idx = line_lower.find(term_lower, idx)
+                    if found_idx == -1:
+                        break
+                    
+                    # Find bounding box for the match
+                    match_end = found_idx + len(term)
+                    rect = _get_rect_for_range(span_info, found_idx, match_end)
+                    if rect:
+                        positions.append(rect)
+                    
+                    idx = found_idx + 1
+                    
+    except Exception as e:
+        print(f"Character-level search error: {e}")
+    
+    return positions
+
+
+def _get_rect_for_range(
+    span_info: List[Tuple[int, int, Tuple[float, float, float, float]]],
+    start: int,
+    end: int
+) -> Optional[fitz.Rect]:
+    """Get bounding rectangle for a character range across spans"""
+    rects = []
+    
+    for span_start, span_end, bbox in span_info:
+        # Check if this span overlaps with our range
+        if span_end > start and span_start < end:
+            rects.append(fitz.Rect(bbox))
+    
+    if not rects:
+        return None
+    
+    # Union all overlapping span rectangles
+    result = rects[0]
+    for rect in rects[1:]:
+        result = result | rect  # Union operation
+    
+    return result
+
+
+def _fuzzy_search_in_page(
+    page: fitz.Page,
+    term: str,
+    threshold: int
+) -> List[fitz.Rect]:
+    """
+    Fuzzy search for a term in the page using RapidFuzz.
+    Returns positions of words that match within the threshold.
+    """
+    positions = []
+    
+    try:
+        text_dict = page.get_text("dict")
+        
+        for block in text_dict.get("blocks", []):
+            if "lines" not in block:
+                continue
+            
+            for line in block["lines"]:
+                for span in line["spans"]:
+                    words = span["text"].split()
+                    bbox = span["bbox"]
+                    
+                    # Check each word in the span
+                    for word in words:
+                        score = fuzz.ratio(word.lower(), term.lower())
+                        if score >= threshold:
+                            # For simplicity, use the whole span bbox
+                            # More precise would be to calculate word position
+                            positions.append(fitz.Rect(bbox))
+                            break
+                            
+    except Exception as e:
+        print(f"Fuzzy search error: {e}")
+    
+    return positions
+
+
 def legal_redact_pdf(input_path, output_path, pii_terms=None,
-                     method="full_redact", replace_text="[REDACTED]"):
+                     method="full_redact", replace_text="[REDACTED]",
+                     fuzzy_threshold: Optional[int] = None):
     """
     Redact sensitive information from a PDF.
 
@@ -91,6 +276,7 @@ def legal_redact_pdf(input_path, output_path, pii_terms=None,
         method: "full_redact" (remove text), "obfuscate" (black box), 
                 "replace" (text substitution)
         replace_text: Text to insert if method="replace"
+        fuzzy_threshold: If set, enable fuzzy matching for text search (0-100)
     """
     if pii_terms is None:
         pii_terms = []
@@ -101,7 +287,8 @@ def legal_redact_pdf(input_path, output_path, pii_terms=None,
     for page_num, page in enumerate(doc):
         # --- TEXT LAYER PROCESSING ---
         for term in pii_terms:
-            areas = page.search_for(term)
+            # Use enhanced search with fallback strategies
+            areas = search_text_with_fallback(page, term, fuzzy_threshold)
 
             for rect in areas:
                 if method == "replace":
@@ -132,7 +319,8 @@ def legal_redact_pdf(input_path, output_path, pii_terms=None,
                             img_bytes,
                             pii_terms,
                             method=method,
-                            replace_text=replace_text
+                            replace_text=replace_text,
+                            fuzzy_threshold=fuzzy_threshold
                         )
 
                         # Create a new pixmap from processed bytes
@@ -169,8 +357,18 @@ def legal_redact_pdf(input_path, output_path, pii_terms=None,
     doc.close()
 
 
-def process_image_with_ocr(img_bytes, pii_terms, method, replace_text):
-    """Process image with OCR and redaction"""
+def process_image_with_ocr(img_bytes, pii_terms, method, replace_text,
+                           fuzzy_threshold: Optional[int] = None):
+    """
+    Process image with OCR and redaction.
+    
+    Args:
+        img_bytes: Image data as bytes
+        pii_terms: List of PII terms to redact
+        method: Redaction method (full_redact, obfuscate, replace)
+        replace_text: Replacement text for 'replace' method
+        fuzzy_threshold: If set, enable fuzzy matching (0-100)
+    """
     image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     open_cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
@@ -183,8 +381,34 @@ def process_image_with_ocr(img_bytes, pii_terms, method, replace_text):
     )
 
     for i in range(len(ocr_result['text'])):
-        text = ocr_result['text'][i]
-        if any(term.lower() in text.lower() for term in pii_terms):
+        text = ocr_result['text'][i].strip()
+        if not text:
+            continue
+            
+        # Check if this word matches any PII term
+        is_match = False
+        
+        for term in pii_terms:
+            # Exact match (case-insensitive)
+            if term.lower() in text.lower():
+                is_match = True
+                break
+            
+            # Fuzzy match if threshold is set
+            if fuzzy_threshold and RAPIDFUZZ_AVAILABLE:
+                score = fuzz.ratio(text.lower(), term.lower())
+                if score >= fuzzy_threshold:
+                    is_match = True
+                    break
+                    
+                # Also check partial ratio for longer terms
+                if len(term) > 4:
+                    partial_score = fuzz.partial_ratio(term.lower(), text.lower())
+                    if partial_score >= fuzzy_threshold:
+                        is_match = True
+                        break
+        
+        if is_match:
             x, y, w, h = (
                 ocr_result['left'][i],
                 ocr_result['top'][i],
