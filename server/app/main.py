@@ -24,7 +24,7 @@ async def lifespan(app: FastAPI):
     # Startup
     configure_logging(s.app_env)
     log = structlog.get_logger()
-    log.info("startup", event="startup", app_env=s.app_env)
+    log.info("startup", app_env=s.app_env)
 
     # Guard: refuse to boot in production with dev secret
     if s.app_env == "production" and s.jwt_secret == _DEFAULT_DEV_SECRET:
@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    log.info("shutdown", event="shutdown")
+    log.info("shutdown")
 
 
 def create_app() -> FastAPI:
