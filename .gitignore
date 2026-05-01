@@ -1,2 +1,4 @@
 temp_uploads/
 document_storage/
+nginx/dev.crt
+nginx/dev.key
