@@ -1,32 +1,112 @@
+name: redactly
+
 services:
-  server:
-    build:
-      context: .
-      dockerfile: server/Dockerfile
-    ports:
-      - "5000:5000"
-    networks:
-      - app-network
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: redactly
+      POSTGRES_PASSWORD: redactly
+      POSTGRES_DB: redactly
     volumes:
-      - ./server/document_storage:/app/document_storage
-      - ./server/temp_uploads:/app/temp_uploads
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U redactly -d redactly"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
 
-  client:
+  ollama:
+    # Used by Plan 3 (LLM verifier). Started here so the stack is whole.
+    image: ollama/ollama:0.4.7
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  api:
     build:
-      context: .
-      dockerfile: client/Dockerfile
-    ports:
-      - "3000:3000"
+      context: ./server
+      dockerfile: Dockerfile
+    image: redactly-server:foundation
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://redactly:redactly@postgres:5432/redactly
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_LOCAL_ROOT: /var/lib/redactly/blobs
+    volumes:
+      - blobs:/var/lib/redactly/blobs
     depends_on:
-      - server
-    networks:
-      - app-network
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "python -m cli migrate && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
 
+  worker:
+    image: redactly-server:foundation
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://redactly:redactly@postgres:5432/redactly
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_LOCAL_ROOT: /var/lib/redactly/blobs
+    volumes:
+      - blobs:/var/lib/redactly/blobs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    restart: unless-stopped
 
-networks:
-  app-network:
-    driver: bridge
+  beat:
+    image: redactly-server:foundation
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://redactly:redactly@postgres:5432/redactly
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "beat", "--loglevel=info", "--schedule=/tmp/celerybeat-schedule"]
+    restart: unless-stopped
 
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "443:443"
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/dev.crt:/etc/nginx/certs/server.crt:ro
+      - ./nginx/dev.key:/etc/nginx/certs/server.key:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  ollama-models:
+  blobs:
