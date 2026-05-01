@@ -244,7 +244,7 @@ The single most consequential addition. Catches the failures that pure pattern +
 - "Is `2024-03-15` a date of birth or just an invoice date?"
 - "Is `Apollo Hospitals` an organization (PII-relevant in some contexts) or a place reference?"
 
-**Trigger policy** keeps verifier load to ~10–25% of detected spans:
+**Trigger policy** keeps verifier load to ~10–25% of detected spans. Triggers are **OR-combined** — the verifier fires for a span if any one of the following holds:
 
 1. Layers A and B disagree (one fires, the other doesn't; or they fire with different types).
 2. Pre-calibrator score in `[0.5, 0.8]`.
@@ -275,6 +275,42 @@ The single most consequential addition. Catches the failures that pure pattern +
 - Overlap merge: prefer longer span on containment; higher score on partial overlap; both kept (and surfaced for HITL) if neither dominates.
 - Deny-list filtering: per-tenant YAML loaded at boot; replaces the current hardcoded `DENY_LIST` set.
 - Confidence buckets drive the HITL UI's bulk auto-approve.
+
+**`evidence_jsonb` recommended shape** (written by every layer; merged by the calibrator):
+
+```json
+{
+  "rules": {
+    "fired": true,
+    "rule_name": "aadhaar_pattern",
+    "raw_score": 0.85,
+    "checksum_validated": true,
+    "context_boost": 0.10
+  },
+  "ner": {
+    "fired": true,
+    "model": "urchade/gliner_multi_pii-v1",
+    "raw_score": 0.78,
+    "label": "PERSON"
+  },
+  "llm": {
+    "fired": true,
+    "skipped": null,                     // or "unreachable" | "parse_error"
+    "model": "phi3.5:mini-instruct-q4_K_M",
+    "prompt_version": "verifier@1.0.0",
+    "is_pii": true,
+    "confirmed_type": "PERSON",
+    "confidence": 0.92,
+    "reason": "label/value table cell; 'Father Name' label precedes value"
+  },
+  "calibrator": {
+    "merged_from": ["det_a1b2", "det_c3d4"],
+    "trigger_reasons": ["disagreement", "table_cell"]
+  }
+}
+```
+
+This shape is normative — every layer writes its slot; absent slots mean the layer didn't fire. The calibrator records which trigger(s) caused the LLM to run.
 
 ### 3.6 Custom keywords / regex (preserved + improved)
 
@@ -381,7 +417,7 @@ Three modules, one per output surface, all consuming `list[Detection]`:
   - Render the image bytes; draw burn-in rectangles over each span's pixel bbox.
   - Re-encode (preserving original format where reasonable).
   - `page.replace_image(xref, stream=new_bytes)` if available, else wipe-and-overlay via redaction annotation + `page.insert_image(bbox, stream=new_bytes, overlay=True)`.
-  - Runs after text redactions per page.
+  - **Ordering with text redactions on the same page is critical** to avoid the cross-ref corruption bug that motivates the rewrite (§4.1). The applier follows this strict per-page sequence: (1) collect both text and image `Detection`s for the page; (2) call `page.add_redact_annot(...)` for every text-layer span; (3) call `page.add_redact_annot(...)` to wipe the underlying image-stream bytes for any image being replaced; (4) call `page.apply_redactions(images=PDF_REDACT_IMAGE_NONE)` **once**; (5) only after `apply_redactions` returns, call `page.replace_image` / `page.insert_image` to overlay the rendered redacted images. There is exactly one `apply_redactions` call per page.
 - **`redaction/image_raster.py`** — for raw image inputs:
   - Burn-in rectangles in pixel space; re-encode to original format; written as the redacted artefact.
 
@@ -573,6 +609,8 @@ Every state transition + every approval/rejection/edit writes an `audit_events` 
 - Celery beat task purges expired blobs and nulls URIs on the rows.
 - Manual `DELETE /jobs/{id}` supported and audited.
 
+**Detection-text purge at expiry (privacy-critical).** `detections.text` and `detections.approved_text` store the actual matched substrings — by definition, the PII the system was redacting. Persisting these indefinitely after the source blobs expire would defeat the privacy posture. At expiry, the purge task therefore also nulls `detections.text`, `detections.approved_text`, and `detections.bbox_jsonb`, while preserving `entity_type`, `score`, `confidence_bucket`, `source_layer`, and `evidence_jsonb` (with any free-text PII inside `evidence_jsonb.llm.reason` redacted to `[purged]`). Audit rows referencing the job retain `target_id` but never embed PII text in `payload_jsonb` — the audit writer must hash/redact PII in payloads at write time.
+
 ## 6. Deployment, auth, operations
 
 ### 6.1 Deployment
@@ -608,6 +646,8 @@ Three identity sources funnel into one `User` row:
 1. **Local accounts** — Argon2-hashed password; bootstrap via `redactly admin create --email ... --password ...`. No public signup.
 2. **OIDC** — generic OIDC client (Keycloak / Auth0 / Azure AD / Google / Okta). JIT user provisioning; `OIDC_ROLE_CLAIM` + `OIDC_ROLE_MAP` for role mapping.
 3. **API keys** — scoped (`jobs:create`, `jobs:read`, `admin:audit`); `X-API-Key` header; never re-exposed after creation.
+
+**OIDC role default:** when an OIDC login produces no claim that maps to a known role, the JIT-provisioned user receives the most-restrictive role — `viewer`. Admins can elevate via the admin UI. This default avoids the failure mode where a misconfigured `OIDC_ROLE_MAP` accidentally grants `admin` to anyone with a successful SSO session.
 
 Sessions: JWT (15 min) + rotating refresh token. CSRF token on state-changing endpoints (cookie + header).
 
