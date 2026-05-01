@@ -2,112 +2,89 @@
 
 # RedactLy.AI
 
-A document redaction system that helps protect sensitive information in your documents using AI-powered redaction techniques.
+Privacy-first PII redaction for documents and images. Runs fully self-hosted; no
+cloud APIs in any data path.
 
-## 🏗️ Architecture Overview
+> **V2 is in active development.** This README documents the V2 stack scaffolded
+> by `docs/superpowers/plans/2026-05-01-redactly-foundation.md`. The legacy V1
+> Flask code is retained at `server.legacy/` for reference and will be removed
+> once V2 reaches functional parity.
 
-### Backend Architecture (server/)
+## Stack
 
-The backend is built with Flask and Gunicorn, designed for reliability and security.
+- **Backend:** FastAPI · Celery · Postgres 16 · Redis 7 · Ollama (CPU; GPU optional)
+- **Frontend:** React + Vite + shadcn (rewritten in Plan 6)
+- **Auth:** local accounts (Argon2 + JWT) · API keys · OIDC (Plan 5)
+- **Storage:** local FS (default) · S3/MinIO (configurable in a follow-up plan)
 
-#### Core Components (`server/src/`)
+## Boot
 
-1. **app.py** - Main Application Entry Point
-   - Handles HTTP routes and API endpoints.
-   - Manages file uploads and document processing.
-   - **Production Ready**: Runs via Gunicorn.
-   - **Automated Cleanup**: Includes background scheduler to delete old temporary files (older than 1 hour).
-   - Key endpoints:
-     - `/redact` - Handles document redaction (PDF processing).
-     - `/health` - Service health check.
-     - `/entity-types` - Returns supported PII entities.
+```bash
+cp .env.example .env                   # adjust JWT_SECRET in production
+openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout nginx/dev.key -out nginx/dev.crt \
+    -days 365 -subj "/CN=localhost" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 
-2. **redaction_service.py**
-   - Core redaction logic implementation.
-   - orchestrates the text extraction, PII detection, and redaction process.
+docker compose up -d
+docker compose exec api python -m cli admin create \
+    --email you@example.com --password 'change-me-now'
+```
 
-3. **hybrid_detector.py** 🧠
-   - **Advanced PII Detection**: Combines Presidio Analyzer, Regex, and custom logic.
-   - **Context Awareness**: Special logic for table structures (e.g., detecting names following "Father Name" or "Student Name" while ignoring the headers themselves).
-   - **Smart Filtering**: Deny-lists to prevent false positive redactions of common headers.
+> The CLI is invoked as a Python module (`python -m cli ...`); there is no
+> separate `redactly` console script in V1.0 — adding one would require
+> changing the Dockerfile to install the project package, which is a V2
+> nice-to-have.
 
-4. **ocr_redaction.py**
-   - **Visual Redaction**: Handles both text layer redaction and image-based redaction (burning redactions into the document).
-   - **Metadata Scrubbing**: Removes XML metadata from processed PDFs.
+Then:
 
-5. **auto_emailer.py**
-   - Email notification system for completed jobs (if configured).
+```bash
+curl -k https://localhost/api/v1/health
+# {"status":"healthy","components":{"database":true,"redis":true}}
 
-6. **config.py**
-   - Centralized configuration management and environment variables.
+curl -k -X POST https://localhost/api/v1/auth/login \
+    -H 'Content-Type: application/json' \
+    -d '{"email":"you@example.com","password":"change-me-now"}'
+# {"access_token":"eyJ...","refresh_token":"eyJ...","token_type":"Bearer"}
+```
 
-#### Storage
-- **Ephemeral Storage**: Uploads are stored in `temp_uploads/` and automatically cleaned up after 1 hour. No permanent database is required for the core redaction workflow.
+## GPU mode
 
-### Frontend Architecture (client/)
+```bash
+docker compose -f docker-compose.yml -f compose.gpu.yml up -d
+```
 
-The frontend is built with React, TypeScript, and Vite, featuring a modern, responsive UI.
+The GPU overlay swaps the LLM verifier (Plan 3) to `qwen2.5:7b-instruct-q4_K_M`
+and reserves NVIDIA devices for the Ollama and worker services. CPU mode runs
+`phi3.5:mini-instruct-q4_K_M` by default.
 
-- **Environment Config**: Uses `.env` for API URL configuration (`VITE_API_URL`).
-- **Components**: Built with reusable React components (in `client/src/components/`).
-- **State Management**: Uses React Query for efficient data fetching.
+## Operations
 
-## 🚀 Getting Started
+- **Backup:** `./ops/backup.sh [output-dir]` — dumps Postgres + blob volume into a timestamped tarball.
+- **Restore:** `./ops/restore.sh path/to/backup.tar.gz`.
+- **Logs:** structured JSON on stdout for every service.
+- **Metrics:** `GET /api/v1/metrics` — Prometheus exposition format.
 
-### Prerequisites
-- Docker
-- Ollama (optional, for local LLM features)
+## API surface (V2 — current scope)
 
-### Running with Docker
+| Endpoint | Notes |
+|---|---|
+| `POST /api/v1/auth/login` | Returns access + refresh JWT |
+| `GET  /api/v1/auth/me` | Returns current user identity |
+| `POST /api/v1/admin/api-keys` | Admin-only; returns plaintext key once |
+| `GET  /api/v1/admin/api-keys` | Admin-only |
+| `DELETE /api/v1/admin/api-keys/{id}` | Admin-only |
+| `GET  /api/v1/health` | DB + Redis liveness |
+| `GET  /api/v1/metrics` | Prometheus metrics |
 
-We provide a robust startup script to build and run the application containers.
+Job, detection, and redaction endpoints land in Plan 5; the HITL frontend in Plan 6.
 
-1. **Start the application:**
-   ```bash
-   ./start.sh
-   ```
-   *This script handles building the images, setting up the network, and starting the containers for both Client and Server.*
+## Architecture, plans, spec
 
-2. **Access the application:**
-   - **Frontend**: http://localhost:3000
-   - **Backend API**: http://localhost:5000
+- Spec: `docs/superpowers/specs/2026-05-01-redactly-overhaul-design.md`
+- Roadmap: `docs/superpowers/plans/2026-05-01-redactly-overhaul-roadmap.md`
+- Foundation plan (this scaffolding): `docs/superpowers/plans/2026-05-01-redactly-foundation.md`
 
-## 📝 API Documentation
+## License
 
-### Document Redaction
-
-**Endpoint**: `POST /redact`
-
-**Body (Multipart Form Data):**
-- `files`: One or more PDF files.
-- `method`: `full_redact` (blackout), `replace` (text replacement), or `obfuscate`.
-- `replace_text`: Text to use if method is `replace`.
-- `custom_keywords`: JSON list of extra words to redact.
-- `match_mode`: `exact` or `fuzzy`.
-- `fuzzy_threshold`: 0-100 (for fuzzy matching).
-- `enabled_entities`: JSON list of entities to detect (e.g., `["PERSON", "AADHAAR_IN"]`).
-
-**Response:**
-- Returns a ZIP file containing the redacted PDF(s).
-
-### Health Check
-**Endpoint**: `GET /health`
-- Returns `{"status": "healthy"}` if the server is running.
-
-## 🔐 Security & Reliability Features
-
-1.  **Non-Root Execution**: Server container runs as a non-privileged user (`appuser`, UID 5000) for enhanced security.
-2.  **Production Server**: Uses **Gunicorn** instead of the Flask development server for better concurrency and stability.
-3.  **Automated Cleanup**: Background scheduler automatically removes temporary files to prevent disk space exhaustion.
-4.  **Smart Redaction**:
-    - **Context-Aware**: Distinguishes between labels ("Name") and values ("John Doe") in tabular data.
-    - **False Positive Prevention**: Includes deny-lists for common form headers.
-5.  **Secure Processing**: Original tokens are removed from the PDF stream, and images are processed to ensure underlying data is destroyed.
-
-## 🛠️ Development
-
-- **Server**: Python 3.12, Flask, PyMuPDF, Presidio.
-- **Client**: Node.js 22, React, Vite, TypeScript.
-
-## 📄 License
-This project is licensed under the MIT License.
+MIT.
