@@ -1,4 +1,37 @@
+# Legacy V1 ephemeral data
 temp_uploads/
 document_storage/
+
+# Local TLS dev material — each developer regenerates
 nginx/dev.crt
 nginx/dev.key
+
+# Local environment files (secrets)
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# uv-managed virtual environments
+.venv/
+server/.venv/
+
+# Local backup output from ops/backup.sh
+backups/
+
+# Editor / OS clutter
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Claude Code session state
+.claude/
