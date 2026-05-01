@@ -2541,7 +2541,7 @@ Foundation is done when every Task 23 step passes on a clean clone:
 
 - [x] `docker compose up -d` brings every service healthy.
 - [x] Alembic migration created all six tables on first start.
-- [x] `redactly admin create` provisions the first admin.
+- [x] `python -m cli admin create` (run inside the `api` container) provisions the first admin.
 - [x] Login returns a valid JWT; `/auth/me` echoes the admin identity.
 - [x] `/health` returns DB + Redis reachability.
 - [x] `/metrics` returns Prometheus output with the declared counters.
