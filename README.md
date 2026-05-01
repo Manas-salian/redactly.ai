@@ -2,41 +2,35 @@
 
 # RedactLy.AI
 
-Privacy-first PII redaction for documents and images. Runs fully self-hosted; no
-cloud APIs in any data path.
+Privacy-first PII redaction for documents and images. Runs fully self-hosted; no cloud APIs in any data path.
 
-> **V2 is in active development.** This README documents the V2 stack scaffolded
-> by `docs/superpowers/plans/2026-05-01-redactly-foundation.md`. The legacy V1
-> Flask code is retained at `server.legacy/` for reference and will be removed
-> once V2 reaches functional parity.
+**Status:** Foundation V1 (current) · Plans 2–6 in design
 
-## Stack
+> **V2 is in active development.** This README documents the V2 stack. The legacy V1
+> Flask code is retained at `server.legacy/` for reference and will be removed once
+> V2 reaches functional parity.
 
-- **Backend:** FastAPI · Celery · Postgres 16 · Redis 7 · Ollama (CPU; GPU optional)
-- **Frontend:** React + Vite + shadcn (rewritten in Plan 6)
-- **Auth:** local accounts (Argon2 + JWT) · API keys · OIDC (Plan 5)
-- **Storage:** local FS (default) · S3/MinIO (configurable in a follow-up plan)
-
-## Boot
+## Quickstart
 
 ```bash
-cp .env.example .env                   # adjust JWT_SECRET in production
+# 1. Copy environment file and set a real secret for production
+cp .env.example .env
+
+# 2. Generate a self-signed TLS certificate for local development
 openssl req -x509 -nodes -newkey rsa:2048 \
     -keyout nginx/dev.key -out nginx/dev.crt \
     -days 365 -subj "/CN=localhost" \
     -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 
+# 3. Start the full stack
 docker compose up -d
+
+# 4. Create the first admin user
 docker compose exec api python -m cli admin create \
     --email you@example.com --password 'change-me-now'
 ```
 
-> The CLI is invoked as a Python module (`python -m cli ...`); there is no
-> separate `redactly` console script in V1.0 — adding one would require
-> changing the Dockerfile to install the project package, which is a V2
-> nice-to-have.
-
-Then:
+Verify it works:
 
 ```bash
 curl -k https://localhost/api/v1/health
@@ -48,42 +42,118 @@ curl -k -X POST https://localhost/api/v1/auth/login \
 # {"access_token":"eyJ...","refresh_token":"eyJ...","token_type":"Bearer"}
 ```
 
+> **Windows note:** port 80 is often occupied. Use `http://localhost:8080` for plain
+> HTTP; the `8080:80` mapping is in `docker-compose.yml`. HTTPS remains on 443.
+
+## What's here today (Foundation V1)
+
+The Foundation phase stands up the complete application skeleton:
+
+- **REST API** — auth (login, me), admin API-key management, health, and Prometheus metrics. See the [API surface](#api-surface) table below.
+- **Postgres schema** — all six tables (tenants, users, api_keys, jobs, detections, audit_events) with Alembic migrations. The full schema is in place so later plans don't need historical-data migrations.
+- **Auth** — Argon2 password hashing, HS256 JWT (15-min access + 7-day refresh), scoped API keys with O(1) prefix lookup, role-based access control (admin / reviewer / viewer).
+- **Celery + Redis** — worker and beat processes wired and running; a `ping` smoke task confirms worker liveness. Real job tasks land in Plans 2–4.
+- **BlobStore abstraction** — `LocalBlobStore` implementation backed by a Docker volume; S3/MinIO interface stubbed for later plans.
+- **Structured logging** — `structlog` JSON output on every service; `x-request-id` propagated through the middleware chain.
+- **Docker Compose stack** — api, worker, beat, postgres, redis, ollama, nginx all orchestrated in a single file.
+- **Nginx TLS terminator** — TLS 1.2/1.3 with dev cert; forwards `/api/` to the FastAPI container.
+- **Backup/restore scripts** — `ops/backup.sh` / `ops/restore.sh` for Postgres + blob volume.
+- **Bootstrap CLI** — `python -m cli admin create` and `python -m cli migrate`.
+
+## What's NOT here yet
+
+These items are intentionally deferred to later plans:
+
+| Deferred item | Target plan |
+|---|---|
+| Document upload, parsing (PDF, images, OCR) | Plan 2 |
+| PII detection engine (rules + NER + LLM verifier) | Plan 3 |
+| Redaction pipeline and verification pass | Plan 4 |
+| Job lifecycle, WebSocket, OIDC SSO, full audit API | Plan 5 |
+| HITL review frontend (PDF.js, overlay, bulk ops) | Plan 6 |
+| Office formats (DOCX/XLSX/PPTX) | V2 |
+| Multi-tenant runtime | V2 |
+| Tests and CI | V2 |
+| S3/MinIO blob backend implementations | Follow-up plan |
+
+## API surface
+
+| Method | Endpoint | Notes |
+|---|---|---|
+| `POST` | `/api/v1/auth/login` | Returns access + refresh JWT; 10 req/min/IP rate limit |
+| `GET` | `/api/v1/auth/me` | Returns current user identity |
+| `POST` | `/api/v1/admin/api-keys` | Admin-only; returns plaintext key exactly once |
+| `GET` | `/api/v1/admin/api-keys` | Admin-only; lists all keys for the tenant |
+| `DELETE` | `/api/v1/admin/api-keys/{id}` | Admin-only; soft-revokes a key |
+| `GET` | `/api/v1/health` | DB + Redis liveness check |
+| `GET` | `/api/v1/metrics` | Prometheus exposition format |
+
+Interactive API docs are auto-generated by FastAPI at `/api/v1/docs` (Swagger) and `/api/v1/redoc` (ReDoc) when the server is running.
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| API server | FastAPI 0.115 + Uvicorn |
+| Task queue | Celery 5.4 + Redis 7 |
+| Database | PostgreSQL 16 + SQLAlchemy 2.0 + Alembic |
+| Auth | Argon2 + HS256 JWT (`python-jose`) |
+| LLM runtime | Ollama (CPU default; GPU optional) |
+| Dependency manager | uv |
+| Logging | structlog (JSON) |
+| Rate limiting | slowapi |
+| Reverse proxy | Nginx 1.27 (TLS 1.2/1.3) |
+| Container runtime | Docker Compose v2 |
+| Frontend (current) | React + Vite + shadcn (rewritten in Plan 6) |
+
+## Repository layout
+
+| Path | Purpose |
+|---|---|
+| `server/` | FastAPI application, Alembic migrations, Celery workers, CLI |
+| `server/app/` | Application code (api, core, db, workers) |
+| `server/ops/` | Backup and restore scripts |
+| `client/` | V1 React frontend (retained; full rewrite in Plan 6) |
+| `server.legacy/` | V1 Flask + Presidio implementation (read-only reference) |
+| `nginx/` | Nginx config + dev TLS cert |
+| `ops/` | Host-side backup/restore helpers (mirror of `server/ops/`) |
+| `docs/` | Design spec, roadmap, and per-plan implementation docs |
+| `assets/` | Static assets (logo, etc.) |
+| `.env.example` | All documented environment variables with defaults |
+| `docker-compose.yml` | Full stack orchestration |
+| `compose.gpu.yml` | GPU overlay for Ollama + worker |
+
 ## GPU mode
 
 ```bash
 docker compose -f docker-compose.yml -f compose.gpu.yml up -d
 ```
 
-The GPU overlay swaps the LLM verifier (Plan 3) to `qwen2.5:7b-instruct-q4_K_M`
-and reserves NVIDIA devices for the Ollama and worker services. CPU mode runs
-`phi3.5:mini-instruct-q4_K_M` by default.
+The GPU overlay adds NVIDIA device reservations for Ollama and the worker service.
+CPU mode uses `phi3.5:mini-instruct-q4_K_M`; GPU mode switches to the 7B model
+(configured when the LLM verifier lands in Plan 3).
 
 ## Operations
 
 - **Backup:** `./ops/backup.sh [output-dir]` — dumps Postgres + blob volume into a timestamped tarball.
-- **Restore:** `./ops/restore.sh path/to/backup.tar.gz`.
-- **Logs:** structured JSON on stdout for every service.
+- **Restore:** `./ops/restore.sh path/to/redactly-backup-TIMESTAMP.tar.gz`
+- **Logs:** `docker compose logs -f api` — structured JSON on stdout.
 - **Metrics:** `GET /api/v1/metrics` — Prometheus exposition format.
+- **Migrations:** `docker compose exec api python -m cli migrate`
 
-## API surface (V2 — current scope)
+## Documentation
 
-| Endpoint | Notes |
+| Document | Contents |
 |---|---|
-| `POST /api/v1/auth/login` | Returns access + refresh JWT |
-| `GET  /api/v1/auth/me` | Returns current user identity |
-| `POST /api/v1/admin/api-keys` | Admin-only; returns plaintext key once |
-| `GET  /api/v1/admin/api-keys` | Admin-only |
-| `DELETE /api/v1/admin/api-keys/{id}` | Admin-only |
-| `GET  /api/v1/health` | DB + Redis liveness |
-| `GET  /api/v1/metrics` | Prometheus metrics |
+| [docs/architecture.md](docs/architecture.md) | Component diagram, data flow, module map, design rationale |
+| [docs/api.md](docs/api.md) | Endpoint reference with request/response schemas and curl examples |
+| [docs/operations.md](docs/operations.md) | Setup, configuration reference, backups, troubleshooting |
+| [docs/contributing.md](docs/contributing.md) | Dev setup, adding endpoints, database columns, code style |
+| [docs/security.md](docs/security.md) | Threat model, auth details, known V1 limitations |
+| [ROADMAP.md](ROADMAP.md) | All six plans + V2/V3 with status and acceptance gates |
+| [CHANGELOG.md](CHANGELOG.md) | Version history in keep-a-changelog format |
 
-Job, detection, and redaction endpoints land in Plan 5; the HITL frontend in Plan 6.
-
-## Architecture, plans, spec
-
-- Spec: `docs/superpowers/specs/2026-05-01-redactly-overhaul-design.md`
-- Roadmap: `docs/superpowers/plans/2026-05-01-redactly-overhaul-roadmap.md`
-- Foundation plan (this scaffolding): `docs/superpowers/plans/2026-05-01-redactly-foundation.md`
+The internal design spec and per-plan task lists live under `docs/superpowers/`.
 
 ## License
 
