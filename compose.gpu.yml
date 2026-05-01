@@ -1,0 +1,22 @@
+# GPU overlay — populated in Plan 3 when the LLM verifier lands.
+# Usage:
+#   docker compose -f docker-compose.yml -f compose.gpu.yml up -d
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      OLLAMA_KEEP_ALIVE: "30m"
+  worker:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
