@@ -45,13 +45,10 @@ def _resolve_api_key(db: Session, plaintext: str) -> User:
         _ph.verify(row.hashed_key, plaintext)
     except VerifyMismatchError as e:
         raise _unauthorized("invalid api key") from e
-    user = (
-        db.query(User)
-        .filter(User.tenant_id == row.tenant_id, User.is_active.is_(True))
-        .order_by(User.created_at)
-        .first()
-    )
-    if not user:
+    if row.created_by is None:
+        raise _unauthorized("api key has no associated user")
+    user = db.get(User, row.created_by)
+    if not user or not user.is_active:
         raise _unauthorized("api key has no associated user")
     return user
 

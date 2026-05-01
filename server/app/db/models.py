@@ -128,8 +128,8 @@ class ApiKey(Base):
     )
     hashed_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     scopes: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False, default=list)
-    created_by: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=False
+    created_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -147,8 +147,8 @@ class Job(Base):
     tenant_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
     )
-    created_by: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=False
+    created_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     status: Mapped[JobStatus] = mapped_column(
         SAEnum(JobStatus, name="job_status"), nullable=False, default=JobStatus.PENDING
