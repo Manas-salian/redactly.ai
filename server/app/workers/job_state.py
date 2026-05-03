@@ -18,7 +18,7 @@ from app.db.models import Job, JobStatus
 # CANCELLED) are not keys — once there, no further transition is allowed.
 _VALID_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = {
     JobStatus.PENDING: frozenset({JobStatus.PARSING, JobStatus.FAILED, JobStatus.CANCELLED}),
-    JobStatus.PARSING: frozenset({JobStatus.DETECTING, JobStatus.FAILED, JobStatus.CANCELLED}),
+    JobStatus.PARSING: frozenset({JobStatus.DETECTING, JobStatus.AWAITING_REVIEW, JobStatus.FAILED, JobStatus.CANCELLED}),
     JobStatus.DETECTING: frozenset({JobStatus.AWAITING_REVIEW, JobStatus.FAILED, JobStatus.CANCELLED}),
     JobStatus.AWAITING_REVIEW: frozenset({JobStatus.REDACTING, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.EXPIRED}),
     JobStatus.REDACTING: frozenset({JobStatus.VERIFYING, JobStatus.FAILED, JobStatus.CANCELLED}),
