@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0-parsing] - 2026-05-03
+
+### Added
+- `DocumentModel`, `TextSpan`, `PageImage`, `Bbox` dataclasses with JSON serialization (`server/app/parsing/document_model.py`)
+- OCR preprocessing pipeline: deskew (Hough), CLAHE, fast non-local-means denoising (`server/app/parsing/ocr_preprocessing.py`)
+- Tesseract OCR wrapper with per-word bboxes and confidence filtering (`server/app/parsing/ocr.py`)
+- PDF parser: text-layer extraction + per-embedded-image OCR + 200 DPI page rasters (`server/app/parsing/pdf_parser.py`)
+- Image parser: JPG, PNG, TIFF (single + multi-page), HEIC, WebP (`server/app/parsing/image_parser.py`)
+- Top-level `parse(...)` dispatcher (`server/app/parsing/parser.py`)
+- Blob-storage persistence for `DocumentModel` JSON + page-render PNGs (`server/app/parsing/persistence.py`)
+- `parse_job(job_id)` Celery task with state-machine transitions (`server/app/workers/tasks.py`)
+- `transition_job(...)` job state-machine helper (`server/app/workers/job_state.py`)
+- CLI: `python -m cli parsing parse-file <path>` and `python -m cli parsing enqueue-parse <job_id>`
+- Smoke fixture builder (`server/fixtures/build.py`)
+
+### Changed
+- `Dockerfile` adds `tesseract-ocr`, `tesseract-ocr-eng`, `libheif1`, `libgl1`, `libglib2.0-0` system packages
+- `pyproject.toml` adds `pymupdf`, `pytesseract`, `pillow`, `pillow-heif`, `opencv-python-headless`, `numpy`
+- `jobs` table gains a `parsed_document_uri TEXT` column (migration `0002_jobs_parsed_uri.py`)
+
 ## [0.2.0-foundation] - 2026-05-01
 
 This release establishes the complete V2 application skeleton. No document

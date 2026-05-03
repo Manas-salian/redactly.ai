@@ -10,7 +10,7 @@ Plan 4 requires both Plan 2 and Plan 3. Plans 5 and 6 require Plan 4.
 
 ## Plan 1 — Foundation
 
-**Status:** Current — shipped 2026-05-01.
+**Status:** Shipped — 2026-05-01.
 
 **What shipped:** FastAPI + Uvicorn skeleton; Postgres 16 + Alembic full schema
 (all six tables); Celery + Redis worker scaffolding; Argon2 + HS256 JWT; API
@@ -33,7 +33,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full commit list.
 
 ## Plan 2 — Document parsing
 
-**Status:** Next — not yet started.
+**Status:** Current — shipped 2026-05-03.
 
 **Scope:** `DocumentModel` dataclasses (`TextSpan`, `PageImage`, `DocumentModel`
 in `server/app/parsing/document_model.py`); PDF parser (`parsing/pdf_parser.py`)

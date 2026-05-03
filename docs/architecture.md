@@ -98,6 +98,30 @@ and `detections.bbox` nulled (the matched text is PII and must not outlive the
 source blob — see spec §5.7). The beat process runs today; the purge task
 implementation is part of Plan 5.
 
+### Document parsing (now built — Plan 2)
+
+PDF and raw-image inputs flow through the same `parse(blob, format)` entrypoint
+in `server/app/parsing/parser.py` and produce a unified `DocumentModel`:
+
+- **PDF:** PyMuPDF native text-layer extraction (per-word bboxes in user-space
+  points) plus per-embedded-image OCR via Tesseract (per-word bboxes in pixel
+  coordinates). Each page also rendered to a 200 DPI PNG for the future review
+  UI.
+- **Raw images** (JPG/PNG/TIFF/HEIC/WebP): single-page or multi-page TIFF
+  iterated via `PIL.ImageSequence`. OCR runs on every page through the same
+  preprocessing chain (deskew → CLAHE → denoise) defined in
+  `parsing/ocr_preprocessing.py`.
+
+The Celery `parse_job(job_id)` task drives the pipeline asynchronously: it
+reads the source blob, runs `parse(...)`, writes the JSON-serialized
+`DocumentModel` to `parsed/<job_id>/document.json` in blob storage, writes
+each page render to `renders/<job_id>/page-<n>.png`, sets
+`jobs.parsed_document_uri` and `jobs.page_count`, and transitions the row to
+`AWAITING_REVIEW` (Plan 3 will insert detection between PARSING and AWAITING_REVIEW).
+
+For offline debugging, `python -m cli parsing parse-file <path>` runs the same
+pipeline synchronously without Celery or the database.
+
 ## Detection engine (target)
 
 The detection pipeline is a three-layer hybrid that lands in Plan 3. The schema
