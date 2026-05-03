@@ -10,6 +10,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates curl libpq5 \
+       tesseract-ocr \
+       tesseract-ocr-eng \
+       libheif1 \
+       libgl1 \
+       libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv
