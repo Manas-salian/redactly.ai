@@ -35,3 +35,8 @@ Thumbs.db
 
 # Claude Code session state
 .claude/
+
+# Smoke fixtures (regenerate via `uv run python -m fixtures.build`)
+server/fixtures/sample.pdf
+server/fixtures/sample.png
+server/fixtures/sample_multipage.tiff

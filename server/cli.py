@@ -73,5 +73,53 @@ def admin_create(
         typer.echo(f"admin: {user.email} (tenant={tenant.name}, id={user.id})")
 
 
+parsing = typer.Typer(no_args_is_help=True, help="Document parsing commands")
+app.add_typer(parsing, name="parsing")
+
+
+@parsing.command("parse-file")
+def parse_file(
+    path: str = typer.Argument(..., help="Path to a local PDF or image"),
+    out: str = typer.Option(None, "--out", help="Optional path to write the parsed JSON"),
+) -> None:
+    """Parse a local file and print a one-line summary. Bypasses Celery and the
+    DB; useful for offline smoke checks and debugging.
+    """
+    from pathlib import Path as _Path
+
+    from app.parsing.document_model import to_json
+    from app.parsing.parser import parse
+
+    p = _Path(path)
+    if not p.exists():
+        typer.echo(f"file not found: {path}", err=True)
+        raise typer.Exit(code=2)
+
+    blob_bytes = p.read_bytes()
+    fmt = "pdf" if p.suffix.lower() == ".pdf" else "image"
+    model, renders = parse(blob_bytes, source_format=fmt)
+
+    typer.echo(
+        f"parsed: format={model.format} pages={model.page_count} "
+        f"text_spans={len(model.text_spans)} page_renders={len(renders)}"
+    )
+    if out:
+        _Path(out).write_text(to_json(model))
+        typer.echo(f"json written to: {out}")
+
+
+@parsing.command("enqueue-parse")
+def enqueue_parse(
+    job_id: str = typer.Argument(..., help="UUID of an existing Job row"),
+) -> None:
+    """Submit `parse_job` to the Celery queue for an existing Job. Useful for
+    re-running parsing on a job that's stuck in PENDING.
+    """
+    from app.workers.tasks import parse_job
+
+    result = parse_job.delay(job_id)
+    typer.echo(f"enqueued parse_job for job_id={job_id}, celery_task_id={result.id}")
+
+
 if __name__ == "__main__":
     app()

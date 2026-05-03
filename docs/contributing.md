@@ -214,6 +214,28 @@ Where `area` is a short noun matching the changed subsystem (e.g., `auth`,
 `admin`, `health`, `storage`, `migrations`, `docker`). Keep the subject line
 under 72 characters. Add a body if the "why" needs more than one line.
 
+### Working with parsed documents
+
+Parsed `DocumentModel` JSON is the input contract that detection and redaction
+will consume. To inspect the parser's output for a sample file:
+
+```bash
+cd server
+uv run python -m fixtures.build              # generates 3 fixture files
+docker run --rm -v "$(pwd):/app" -w /app redactly-server:foundation \
+    uv run python -m cli parsing parse-file fixtures/sample.pdf --out /tmp/sample.json
+docker run --rm -v "$(pwd):/app" -w /app redactly-server:foundation \
+    cat /tmp/sample.json | head -200
+```
+
+The Tesseract binary lives in the Docker image, so smoke checks involving OCR
+must run inside the container. The CLI command itself is pure Python and works
+on the host *if* you've installed Tesseract locally.
+
+When adding a new parsing capability (a new MIME type, a new preprocessing
+step), keep the change isolated to `server/app/parsing/` and exercise it via
+the CLI before plumbing it into `parse_job`.
+
 ## Plan-driven work
 
 V2 development follows the roadmap in

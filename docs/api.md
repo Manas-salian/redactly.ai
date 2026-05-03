@@ -306,6 +306,10 @@ curl -k https://localhost/api/v1/metrics
 The following endpoints are defined in spec §5.3 and will be added in Plans 2–5.
 None exist in the current codebase.
 
+Note: The document parsing pipeline (`parse_job` task, Document parsing CLI,
+blob persistence) shipped in Plan 2. The upload endpoint and job-lifecycle APIs
+that trigger parsing remain Plan 5.
+
 **Plan 5 — Job lifecycle:**
 
 - `POST /api/v1/jobs` — multipart upload + config; returns `202` with `job_id`
