@@ -161,6 +161,7 @@ class Job(Base):
 
     redacted_blob_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     redacted_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parsed_document_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     error: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
